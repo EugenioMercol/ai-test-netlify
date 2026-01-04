@@ -1,6 +1,6 @@
 name: Certiverso Autofill (image -> JSON)
 
-on:
+'on':
   workflow_dispatch:
     inputs:
       image_url:
