@@ -1,10 +1,10 @@
-name: Certiverso Autofill Test
+name: Certiverso Autofill test
 
 on:
   workflow_dispatch:
+
 jobs:
   ping:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-lastest
     steps:
       - run: echo "ok"
-
