@@ -1,25 +1,49 @@
-// netlify/functions/openai.js
-// Acepta:
-// - image_base64: data URL (data:image/...;base64,...) o base64 pelado
-// - image_url: URL pública (la function la descarga y la convierte a base64)
-// Devuelve JSON estructurado (schema fijo) vía OpenAI Responses API.
+// netlify/functions/openai.js  (CommonJS)
+// Diagnóstico: diferencia si falla descarga de imagen o llamada a OpenAI.
 
-function toDataUrl({ base64, mime }) {
-  const clean = (base64 || "").replace(/^data:.*;base64,/, "").trim();
+function toDataUrl(base64, mime) {
+  const clean = String(base64 || "").replace(/^data:.*;base64,/, "").trim();
   return `data:${mime};base64,${clean}`;
 }
 
-function arrayBufferToBase64(buffer) {
-  let binary = "";
-  const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
-  return Buffer.from(binary, "binary").toString("base64");
+async function fetchWithTimeout(url, opts = {}, ms = 20000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: controller.signal });
+  } finally {
+    clearTimeout(id);
+  }
 }
 
-export async function handler(event) {
+async function downloadToDataUrl(imageUrl) {
+  // Importante: si tu servidor bloquea IPs de datacenter, acá puede explotar con "fetch failed"
+  const resp = await fetchWithTimeout(
+    imageUrl,
+    {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "image/*,*/*;q=0.8",
+      },
+    },
+    20000
+  );
+
+  if (!resp.ok) {
+    const ct = resp.headers.get("content-type") || "";
+    let body = "";
+    try { body = await resp.text(); } catch {}
+    throw new Error(`image_url responded ${resp.status}. content-type=${ct}. body_snippet=${body.slice(0, 200)}`);
+  }
+
+  const contentType = resp.headers.get("content-type") || "image/png";
+  const ab = await resp.arrayBuffer();
+  const b64 = Buffer.from(new Uint8Array(ab)).toString("base64");
+  return `data:${contentType};base64,${b64}`;
+}
+
+exports.handler = async (event) => {
   try {
-    // CORS
     if (event.httpMethod === "OPTIONS") {
       return {
         statusCode: 204,
@@ -32,9 +56,7 @@ export async function handler(event) {
       };
     }
 
-    if (event.httpMethod !== "POST") {
-      return { statusCode: 405, body: "Method Not Allowed" };
-    }
+    if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method Not Allowed" };
 
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) return { statusCode: 500, body: "Missing OPENAI_API_KEY env var" };
@@ -46,50 +68,41 @@ export async function handler(event) {
       return { statusCode: 400, body: "Invalid JSON body" };
     }
 
-    const imageMimeDefault = (payload.image_mime || "image/png").trim();
+    const imageMime = (payload.image_mime || "image/png").trim();
     const imageUrl = (payload.image_url || "").trim();
-    let imageBase64 = (payload.image_base64 || "").trim();
+    const imageBase64 = (payload.image_base64 || "").trim();
 
-    // 1) Si viene base64, lo usamos.
-    // 2) Si NO viene base64 pero viene URL, la function descarga y convierte a base64.
-    if (!imageBase64) {
-      if (!imageUrl) {
-        return { statusCode: 400, body: "Missing image_base64 or image_url" };
+    // 1) Obtener imagen como dataURL
+    let imageDataUrl = "";
+    if (imageBase64) {
+      imageDataUrl = imageBase64.startsWith("data:") ? imageBase64 : toDataUrl(imageBase64, imageMime);
+    } else if (imageUrl) {
+      try {
+        imageDataUrl = await downloadToDataUrl(imageUrl);
+      } catch (e) {
+        // Si tu WAF bloquea Netlify/AWS, vas a caer acá.
+        return {
+          statusCode: 502,
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+          body: JSON.stringify({
+            stage: "image_download",
+            message: "Failed downloading image_url from Netlify",
+            image_url: imageUrl,
+            error: String(e && e.message ? e.message : e),
+          }),
+        };
       }
-
-      // Descargar imagen desde la function (no desde OpenAI)
-      const imgResp = await fetch(imageUrl, {
-        // headers suaves por si tu server es quisquilloso
-        headers: {
-          "User-Agent": "Mozilla/5.0",
-          "Accept": "image/*,*/*;q=0.8",
-        },
-      });
-
-      if (!imgResp.ok) {
-        const msg = `Could not download image_url (status ${imgResp.status})`;
-        return { statusCode: 400, body: msg };
-      }
-
-      const contentType = imgResp.headers.get("content-type") || imageMimeDefault;
-      const ab = await imgResp.arrayBuffer();
-      const b64 = arrayBufferToBase64(ab);
-      imageBase64 = `data:${contentType};base64,${b64}`;
     } else {
-      // Normalizar base64 a data URL si viene "pelado"
-      if (!imageBase64.startsWith("data:")) {
-        imageBase64 = toDataUrl({ base64: imageBase64, mime: imageMimeDefault });
-      }
+      return { statusCode: 400, body: "Missing image_base64 or image_url" };
     }
 
-    // ====== Schema Step2 + Step5 ======
+    // ===== Schema Step2 + Step5 (tus campos) =====
     const schema = {
       type: "object",
       additionalProperties: false,
       required: ["schema_version", "step2", "step5"],
       properties: {
         schema_version: { type: "string", enum: ["1.0"] },
-
         step2: {
           type: "object",
           additionalProperties: false,
@@ -98,112 +111,55 @@ export async function handler(event) {
             productInformation: {
               type: "object",
               additionalProperties: false,
-              required: [
-                "group1",
-                "detailedProductDescription",
-                "generalInformation",
-                "productUses",
-                "productMaterials",
-              ],
+              required: ["group1","detailedProductDescription","generalInformation","productUses","productMaterials"],
               properties: {
                 group1: {
                   type: "object",
                   additionalProperties: false,
-                  required: [
-                    "productDescription",
-                    "productName",
-                    "productBrand",
-                    "productUseAndApplication",
-                  ],
+                  required: ["productDescription","productName","productBrand","productUseAndApplication"],
                   properties: {
-                    productDescription: {
-                      type: "string",
-                      description:
-                        "step2.productInformation.group1.productDescription. Máx 30 caracteres. Si no se deduce sin inventar, ''. Sin saltos de línea.",
-                    },
-                    productName: {
-                      type: "string",
-                      description:
-                        "step2.productInformation.group1.productName. Máx 20 caracteres. Solo si se ve en la imagen; si no, ''.",
-                    },
-                    productBrand: {
-                      type: "string",
-                      description:
-                        "step2.productInformation.group1.productBrand. Máx 20 caracteres. Solo si se ve en la imagen; si no, ''.",
-                    },
-                    productUseAndApplication: {
-                      type: "string",
-                      description:
-                        "step2.productInformation.group1.productUseAndApplication. Máx 100 caracteres. Uso breve coherente; si hay duda, ''.",
-                    },
+                    productDescription: { type: "string", description: "Máx 30. Si no, ''." },
+                    productName: { type: "string", description: "Máx 20. Si no se ve, ''." },
+                    productBrand: { type: "string", description: "Máx 20. Si no se ve, ''." },
+                    productUseAndApplication: { type: "string", description: "Máx 100. Si duda, ''." },
                   },
                 },
-
                 detailedProductDescription: {
                   type: "object",
                   additionalProperties: false,
                   required: ["productDescriptionExtended"],
                   properties: {
-                    productDescriptionExtended: {
-                      type: "string",
-                      description:
-                        "step2.productInformation.detailedProductDescription.productDescriptionExtended. Máx 600 caracteres. Descripción detallada coherente. No inventes datos técnicos/certificaciones. Sin saltos de línea.",
-                    },
+                    productDescriptionExtended: { type: "string", description: "Máx 600. Genérico coherente. No inventes." },
                   },
                 },
-
                 generalInformation: {
                   type: "object",
                   additionalProperties: false,
                   required: ["isElectric"],
-                  properties: {
-                    isElectric: {
-                      type: "boolean",
-                      description:
-                        "step2.productInformation.generalInformation.isElectric. true SOLO con evidencia visible; si no, false.",
-                    },
-                  },
+                  properties: { isElectric: { type: "boolean", description: "true solo con evidencia; si no, false." } },
                 },
-
                 productUses: {
                   type: "object",
                   additionalProperties: false,
                   required: ["foodContact"],
-                  properties: {
-                    foodContact: {
-                      type: "boolean",
-                      description:
-                        "step2.productInformation.productUses.foodContact. true SOLO si es claramente para alimentos/bebidas; si no, false.",
-                    },
-                  },
+                  properties: { foodContact: { type: "boolean", description: "true solo si es claro; si no, false." } },
                 },
-
                 productMaterials: {
                   type: "object",
                   additionalProperties: false,
-                  required: [
-                    "containsPaper",
-                    "containsGlass",
-                    "containsMetal",
-                    "containsTextiles",
-                    "containsBiodegradableMaterial",
-                  ],
+                  required: ["containsPaper","containsGlass","containsMetal","containsTextiles","containsBiodegradableMaterial"],
                   properties: {
-                    containsPaper: { type: "boolean", description: "true SOLO si se ve papel/cartón; si duda, false." },
-                    containsGlass: { type: "boolean", description: "true SOLO si se ve vidrio; si duda, false." },
-                    containsMetal: { type: "boolean", description: "true SOLO si se ve metal; si duda, false." },
-                    containsTextiles: { type: "boolean", description: "true SOLO si se ve textil; si duda, false." },
-                    containsBiodegradableMaterial: {
-                      type: "boolean",
-                      description: "true SOLO con evidencia clara (visible/etiqueta); si duda, false.",
-                    },
+                    containsPaper: { type: "boolean" },
+                    containsGlass: { type: "boolean" },
+                    containsMetal: { type: "boolean" },
+                    containsTextiles: { type: "boolean" },
+                    containsBiodegradableMaterial: { type: "boolean" },
                   },
                 },
               },
             },
           },
         },
-
         step5: {
           type: "object",
           additionalProperties: false,
@@ -219,11 +175,7 @@ export async function handler(event) {
                   additionalProperties: false,
                   required: ["productWarning"],
                   properties: {
-                    productWarning: {
-                      type: "string",
-                      description:
-                        "step5.productInfo.productWarning.productWarning. Máx 600 caracteres. Riesgos, prohibiciones y cuidados genéricos coherentes. Sin inventar datos. Sin saltos de línea.",
-                    },
+                    productWarning: { type: "string", description: "Máx 600. Riesgos/prohibiciones/cuidados genéricos." },
                   },
                 },
               },
@@ -237,60 +189,60 @@ export async function handler(event) {
       "Devuelve SOLO JSON válido que cumpla exactamente el schema. Español. " +
       "No inventes. Strings: '' si no se puede determinar. Booleanos: true solo con evidencia clara; si no, false. " +
       "Límites: productDescription<=30, productName<=20, productBrand<=20, productUseAndApplication<=100, productDescriptionExtended<=600, productWarning<=600. " +
-      "Cuenta caracteres incluyendo espacios. Reformula para cumplir. Sin saltos de línea. Sin markdown. Solo JSON.";
+      "Sin saltos de línea. Solo JSON.";
 
     const openaiBody = {
       model: "gpt-4o-2024-08-06",
       instructions,
-      input: [
-        {
-          role: "user",
-          content: [
-            { type: "input_text", text: "Completa los campos a partir de la imagen del producto." },
-            { type: "input_image", image_url: imageBase64 },
-          ],
-        },
-      ],
-      text: {
-        format: {
-          type: "json_schema",
-          strict: true,
-          name: "certiverso_autofill_v1",
-          schema,
-        },
-      },
+      input: [{
+        role: "user",
+        content: [
+          { type: "input_text", text: "Completa los campos a partir de la imagen del producto." },
+          { type: "input_image", image_url: imageDataUrl },
+        ],
+      }],
+      text: { format: { type: "json_schema", strict: true, name: "certiverso_autofill_v1", schema } },
     };
 
-    const resp = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(openaiBody),
-    });
+    // 2) Llamada a OpenAI
+    let resp;
+    try {
+      resp = await fetchWithTimeout(
+        "https://api.openai.com/v1/responses",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(openaiBody),
+        },
+        30000
+      );
+    } catch (e) {
+      return {
+        statusCode: 502,
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        body: JSON.stringify({
+          stage: "openai_call",
+          message: "Failed calling OpenAI from Netlify",
+          error: String(e && e.message ? e.message : e),
+        }),
+      };
+    }
 
     const raw = await resp.text();
 
-    // Intentar devolver JSON "limpio"
+    // devolver JSON limpio si existe output_text
     try {
       const parsed = JSON.parse(raw);
-      const outText = parsed?.output_text;
+      const outText = parsed && parsed.output_text;
       if (typeof outText === "string" && outText.trim()) {
-        try {
-          const finalObj = JSON.parse(outText);
-          return {
-            statusCode: resp.status,
-            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-            body: JSON.stringify(finalObj),
-          };
-        } catch {
-          return {
-            statusCode: resp.status,
-            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-            body: outText,
-          };
-        }
+        return {
+          statusCode: resp.status,
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+          body: outText,
+        };
       }
     } catch {}
 
@@ -302,8 +254,8 @@ export async function handler(event) {
   } catch (e) {
     return {
       statusCode: 500,
-      headers: { "Content-Type": "text/plain", "Access-Control-Allow-Origin": "*" },
-      body: String(e),
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({ stage: "unknown", error: String(e && e.message ? e.message : e) }),
     };
   }
-}
+};
