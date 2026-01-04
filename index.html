@@ -1,56 +1,149 @@
 <!doctype html>
-<html>
-<head><meta charset="utf-8"><title>AI Test</title></head>
-<body style="font-family:Arial;padding:16px">
-  <input id="img" style="width:720px" value="https://certiverso.online/images/1749910987186-345245658.png">
-  <button id="run">Probar</button>
-  <pre id="out" style="white-space:pre-wrap;border:1px solid #ccc;padding:12px;margin-top:12px;">Listo.</pre>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Certiverso AI Test (Netlify + Base64)</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 16px; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    button { padding: 10px 14px; cursor: pointer; }
+    input[type="text"] { width: 820px; max-width: 100%; padding: 10px; }
+    input[type="file"] { padding: 6px; }
+    .hint { color: #444; font-size: 13px; margin-top: 6px; }
+    pre { white-space: pre-wrap; border: 1px solid #ccc; padding: 12px; margin-top: 12px; border-radius: 6px; }
+    .ok { color: #0a7; font-weight: bold; }
+    .warn { color: #c60; font-weight: bold; }
+  </style>
+</head>
+
+<body>
+  <h2>Imagen → JSON (OpenAI via Netlify Function)</h2>
+
+  <div class="row">
+    <label><b>Subir imagen:</b></label>
+    <input type="file" id="file" accept="image/*" />
+    <button id="run" disabled>Probar</button>
+    <button id="copy" disabled>Copiar JSON</button>
+  </div>
+
+  <div class="hint">
+    <span class="ok">Recomendado:</span> usa “Subir imagen” (Base64) para evitar errores de descarga por URL.
+  </div>
+
+  <hr style="margin:16px 0" />
+
+  <div class="row">
+    <label><b>O usar URL (solo si es pública):</b></label>
+    <input id="imgUrl" type="text" value="https://certiverso.online/images/1749910987186-345245658.png" />
+    <button id="runUrl">Probar por URL</button>
+  </div>
+  <div class="hint">
+    <span class="warn">Ojo:</span> si el servidor bloquea hotlink/bots, OpenAI no podrá descargar la imagen y fallará.
+  </div>
+
+  <pre id="out">Listo.</pre>
+
   <script>
     const out = document.getElementById("out");
-    document.getElementById("run").onclick = async () => {
+    const btnRun = document.getElementById("run");
+    const btnCopy = document.getElementById("copy");
+    const fileInput = document.getElementById("file");
+    const urlInput = document.getElementById("imgUrl");
+
+    function fileToDataURL(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result); // data:image/...;base64,....
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function prettyMaybeJson(text) {
+      try {
+        const obj = JSON.parse(text);
+        return JSON.stringify(obj, null, 2);
+      } catch {
+        return text;
+      }
+    }
+
+    async function callFunction(payload) {
       out.textContent = "Enviando...";
-      const image_url = document.getElementById("img").value.trim();
+      btnCopy.disabled = true;
+
       const r = await fetch("/.netlify/functions/openai", {
         method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({ image_url })
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
       });
-      out.textContent = await r.text();
-    };
+
+      const t = await r.text();
+      const pretty = prettyMaybeJson(t);
+      out.textContent = pretty;
+
+      // habilita copiar si parece JSON válido
+      try {
+        JSON.parse(pretty);
+        btnCopy.disabled = false;
+      } catch {
+        btnCopy.disabled = true;
+      }
+
+      return { status: r.status, text: t };
+    }
+
+    fileInput.addEventListener("change", () => {
+      btnRun.disabled = !fileInput.files || fileInput.files.length === 0;
+    });
+
+    btnRun.addEventListener("click", async () => {
+      try {
+        const f = fileInput.files?.[0];
+        if (!f) {
+          out.textContent = "Selecciona una imagen primero.";
+          return;
+        }
+        const dataUrl = await fileToDataURL(f);
+
+        // mandamos data URL directamente
+        await callFunction({
+          image_base64: dataUrl,
+          image_mime: f.type || "image/png"
+        });
+      } catch (e) {
+        out.textContent = "Error: " + e.message;
+      }
+    });
+
+    document.getElementById("runUrl").addEventListener("click", async () => {
+      try {
+        const image_url = urlInput.value.trim();
+        if (!image_url) {
+          out.textContent = "Pega una URL primero.";
+          return;
+        }
+
+        // Nota: tu function actual está hecha para base64.
+        // Para probar por URL sin tocar nada, convertimos URL->base64 NO es posible en el browser sin CORS.
+        // Así que para URL, hacemos fallback mostrando mensaje:
+        out.textContent =
+          "Tu function está configurada para image_base64 (recomendado). " +
+          "Si querés URL, hay que modificar la function para aceptar image_url y pasarla a OpenAI.";
+      } catch (e) {
+        out.textContent = "Error: " + e.message;
+      }
+    });
+
+    btnCopy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(out.textContent);
+        out.textContent = out.textContent + "\n\n✅ Copiado al portapapeles.";
+      } catch (e) {
+        out.textContent = out.textContent + "\n\n⚠️ No pude copiar: " + e.message;
+      }
+    });
   </script>
-
-<input type="file" id="file" accept="image/*">
-<button id="run">Probar</button>
-<pre id="out">Listo.</pre>
-
-<script>
-const out = document.getElementById("out");
-
-function fileToBase64(file){
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result); // data:image/png;base64,....
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
-document.getElementById("run").onclick = async () => {
-  out.textContent = "Enviando...";
-  const f = document.getElementById("file").files[0];
-  if (!f) { out.textContent = "Selecciona una imagen."; return; }
-
-  const image_base64 = await fileToBase64(f);
-
-  const r = await fetch("/.netlify/functions/openai", {
-    method: "POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({ image_base64 })
-  });
-  out.textContent = await r.text();
-};
-</script>
-
-  
 </body>
 </html>
