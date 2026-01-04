@@ -18,5 +18,39 @@
       out.textContent = await r.text();
     };
   </script>
+
+<input type="file" id="file" accept="image/*">
+<button id="run">Probar</button>
+<pre id="out">Listo.</pre>
+
+<script>
+const out = document.getElementById("out");
+
+function fileToBase64(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result); // data:image/png;base64,....
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+document.getElementById("run").onclick = async () => {
+  out.textContent = "Enviando...";
+  const f = document.getElementById("file").files[0];
+  if (!f) { out.textContent = "Selecciona una imagen."; return; }
+
+  const image_base64 = await fileToBase64(f);
+
+  const r = await fetch("/.netlify/functions/openai", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ image_base64 })
+  });
+  out.textContent = await r.text();
+};
+</script>
+
+  
 </body>
 </html>
