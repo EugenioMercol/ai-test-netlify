@@ -4,17 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       image_url:
-        description: URL publica directa (jpg/png/webp)
+        description: "URL publica directa (jpg/png/webp)"
         required: false
         default: ""
       image_path:
-        description: Ruta dentro del repo (ej: images/cemento-blanco.png)
+        description: "Ruta dentro del repo (ej: images/cemento-blanco.png)"
         required: false
         default: "images/cemento-blanco.png"
       model:
-        description: Modelo
+        description: "Modelo"
         required: false
         default: "gpt-4o-2024-08-06"
+
 
 jobs:
   run:
