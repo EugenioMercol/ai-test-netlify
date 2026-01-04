@@ -1,1 +1,43 @@
+name: Certiverso Autofill (image -> JSON)
 
+on:
+  workflow_dispatch:
+    inputs:
+      image_url:
+        description: "URL pública directa de imagen (jpg/png/webp)."
+        required: false
+        default: "https://upload.wikimedia.org/wikipedia/commons/6/62/Portland_Cement_Bags.jpg"
+      image_path:
+        description: "Ruta dentro del repo (ej: test_images/cemento-blanco.png)."
+        required: false
+        default: ""
+      model:
+        description: "Modelo (ej: gpt-4o-2024-08-06)."
+        required: false
+        default: "gpt-4o-2024-08-06"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run autofill test
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          IMAGE_URL: ${{ inputs.image_url }}
+          IMAGE_PATH: ${{ inputs.image_path }}
+          MODEL: ${{ inputs.model }}
+        run: node scripts/autofill_test.mjs
+
+      - name: Upload result artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: certiverso_autofill_result
+          path: out/result.json
